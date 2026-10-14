@@ -12,6 +12,12 @@
 #   docker compose up -d
 #   docker compose logs -f redis-cluster     # watch startup (~15 seconds)
 #   Verify: docker compose exec redis-cluster redis-cli -p 7000 -a RedisCluster@2024 cluster info
+#
+# Persistence:
+#   Cluster state is stored in the named volume redis-cluster-data:/data.
+#   - docker compose restart redis-cluster   → restarts, keeps all data
+#   - docker compose down && up -d           → restarts, keeps all data (volume survives)
+#   - docker compose down -v && up -d        → full wipe, re-bootstraps from scratch
 
 services:
   redis-cluster:
@@ -33,13 +39,17 @@ services:
           redis-server \
             --port $$port \
             --cluster-enabled yes \
-            --cluster-config-file /tmp/nodes-$$port.conf \
+            --cluster-config-file /data/nodes-$$port.conf \
             --cluster-node-timeout 5000 \
             --requirepass $$REDIS_PASSWORD \
             --masterauth  $$REDIS_PASSWORD \
             --daemonize yes \
-            --logfile     /tmp/redis-$$port.log \
-            --pidfile     /tmp/redis-$$port.pid
+            --dir             /data \
+            --dbfilename      dump-$$port.rdb \
+            --appendonly      yes \
+            --appendfilename  appendonly-$$port.aof \
+            --logfile         /data/redis-$$port.log \
+            --pidfile         /data/redis-$$port.pid
           echo "started Redis on port $$port"
         done
 
@@ -51,15 +61,27 @@ services:
           echo "port $$port is ready"
         done
 
-        # ── Bootstrap the cluster (3 masters + 3 replicas) ──────────────────
-        echo "creating cluster..."
-        redis-cli --cluster create \
-          127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 \
-          127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005 \
-          --cluster-replicas 1 -a $$REDIS_PASSWORD --cluster-yes
+        # ── Bootstrap the cluster (only on first run) ────────────────────────
+        # Use a marker file — NOT nodes.conf, which Redis writes immediately on
+        # startup with just its own entry (non-empty before cluster is formed).
+        if [ -f /data/.bootstrapped ]; then
+          echo "cluster already bootstrapped — skipping"
+        else
+          echo "creating cluster..."
+          redis-cli --cluster create \
+            127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 \
+            127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005 \
+            --cluster-replicas 1 -a $$REDIS_PASSWORD --cluster-yes
+          touch /data/.bootstrapped
+        fi
 
         echo "cluster ready — connect to 127.0.0.1:7000-7005"
         exec tail -f /dev/null
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - redis-cluster-data:/data
     restart: unless-stopped
+
+volumes:
+  redis-cluster-data:

@@ -54,7 +54,8 @@ docker compose exec redis-cluster redis-cli -p 7000 -a RedisCluster@2024 cluster
 # cluster_slots_assigned:16384
 ```
 
-> **Reset:** `docker compose down && docker compose up -d` — cluster state is ephemeral (no volumes).
+> **Restart (keeps data):** `docker compose restart redis-cluster` — instances reload from the persistent volume; no re-bootstrap needed.
+> **Full wipe:** `docker compose down -v && docker compose up -d` — destroys the volume and re-bootstraps a clean cluster.
 
 ---
 
@@ -302,9 +303,35 @@ The container needs to run 6 Redis processes in the background, then block on `t
 
 Tells `redis-cli --cluster create` to assign one replica per master. With 6 nodes and `--cluster-replicas 1`, the tool automatically assigns 3 masters (ports 7000–7002) and 3 replicas (ports 7003–7005). The replica assignments are automatic — you don't need to specify which replica pairs with which master.
 
-### Why no volumes?
+### Why a named volume (`redis-cluster-data`)?
 
-Cluster state (`nodes.conf` and data) is ephemeral inside the container. `docker compose down` wipes everything; `docker compose up -d` starts a clean cluster. For a learning/demo setup this is simpler — you never end up with stale `nodes.conf` files from a previous run causing join failures on restart.
+All six Redis instances write their state to `/data` inside the container, which is backed by the `redis-cluster-data` Docker named volume:
+
+| File | Purpose |
+|---|---|
+| `/data/nodes-700X.conf` | Cluster node registry — node IDs, roles, slot assignments (one per instance) |
+| `/data/appendonly-700X.aof` | AOF log — every write command appended immediately (one per instance) |
+| `/data/dump-700X.rdb` | RDB snapshot — periodic full-data backup (one per instance) |
+| `/data/redis-700X.log` | Per-instance log file |
+| `/data/.bootstrapped` | Marker file — created once after `redis-cli --cluster create` succeeds |
+
+Without a volume, all of this is lost on restart and the cluster has to be rebuilt from scratch.
+
+**Why per-instance filenames (`dump-7000.rdb`, `appendonly-7001.aof`, …)?**
+
+All 6 Redis instances share the same `/data` directory. Without explicit filenames, every instance writes to the default `dump.rdb` and `appendonly.aof`, racing to overwrite each other's files. On restart, each instance would load another instance's data. The `--dbfilename dump-$$port.rdb` and `--appendfilename appendonly-$$port.aof` flags give each instance its own file.
+
+**Why AOF (`--appendonly yes`) instead of relying on RDB?**
+
+RDB (the default) snapshots data periodically. With default save intervals (`save 3600 1` — snapshot after one hour if at least one key changed), a restart after writing just a few keys would lose all data because the snapshot had never been triggered. AOF appends every write command to disk immediately, so no data is lost between snapshots.
+
+**Why a `.bootstrapped` marker instead of checking `nodes.conf`?**
+
+Redis writes `nodes.conf` immediately when it starts — with just its own node entry — before joining any cluster. Checking `[ -s /data/nodes-7000.conf ]` would always return true (non-empty) from the very first startup, causing the bootstrap to be skipped on the first run and leaving 6 isolated nodes that never form a cluster. The `.bootstrapped` file is written by the startup script only after `redis-cli --cluster create` exits successfully, so it reliably indicates a fully formed cluster.
+
+- `docker compose restart redis-cluster` — instances come back up, load existing state, skip bootstrap. All data intact.
+- `docker compose down && docker compose up -d` — volume survives `down`; bootstrap still skipped on next start.
+- `docker compose down -v && docker compose up -d` — `-v` deletes the volume and `.bootstrapped`; bootstrap runs fresh on next start.
 
 ---
 
