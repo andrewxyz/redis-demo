@@ -3,20 +3,32 @@ package com.example.redisdemo.config;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.jsontype.impl.LaissezFaireSubTypeValidator;
+import io.lettuce.core.ReadFrom;
+import io.lettuce.core.cluster.ClusterClientOptions;
+import io.lettuce.core.cluster.ClusterTopologyRefreshOptions;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
+import org.springframework.core.env.Environment;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
 import org.springframework.data.redis.cache.RedisCacheManager;
+import org.springframework.data.redis.connection.RedisClusterConfiguration;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.connection.RedisPassword;
+import org.springframework.data.redis.connection.lettuce.LettuceClientConfiguration;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.serializer.Jackson2JsonRedisSerializer;
 import org.springframework.data.redis.serializer.RedisSerializationContext;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * ╔══════════════════════════════════════════════════════════════╗
@@ -120,6 +132,50 @@ public class RedisConfig {
      *   - userSessions   → 30 min  (session timeout)
      *   - exchangeRates  →  1 min  (changes constantly)
      */
+    // ─────────────────────────────────────────────────────────
+    // CLUSTER MODE — active only when Spring profile "cluster" is set.
+    //
+    // Defines a custom LettuceConnectionFactory that overrides Spring Boot's
+    // auto-configured standalone factory. Adds two cluster-specific features:
+    //   1. Topology refresh — Lettuce re-discovers nodes after failover/scale
+    //   2. ReadFrom.REPLICA_PREFERRED — read-heavy ops can use replicas
+    //
+    // The RedisTemplate and RedisCacheManager beans above are unaffected —
+    // they consume RedisConnectionFactory regardless of topology.
+    // ─────────────────────────────────────────────────────────
+    @Bean
+    @Profile("cluster")
+    public LettuceConnectionFactory lettuceConnectionFactory(Environment env) {
+        List<String> nodes = Arrays.stream(
+            env.getRequiredProperty("spring.data.redis.cluster.nodes").split(",")
+        ).map(String::trim).collect(Collectors.toList());
+
+        RedisClusterConfiguration clusterConfig = new RedisClusterConfiguration(nodes);
+
+        String password = env.getProperty("spring.data.redis.password");
+        if (password != null && !password.isBlank()) {
+            clusterConfig.setPassword(RedisPassword.of(password));
+        }
+
+        clusterConfig.setMaxRedirects(
+            Integer.parseInt(env.getProperty("spring.data.redis.cluster.max-redirects", "3"))
+        );
+
+        ClusterTopologyRefreshOptions topologyRefresh = ClusterTopologyRefreshOptions.builder()
+            .enableAllAdaptiveRefreshTriggers()           // react to MOVED, ASK, reconnect events
+            .enablePeriodicRefresh(Duration.ofSeconds(30)) // poll every 30 s as a backstop
+            .build();
+
+        LettuceClientConfiguration clientConfig = LettuceClientConfiguration.builder()
+            .clientOptions(ClusterClientOptions.builder()
+                .topologyRefreshOptions(topologyRefresh)
+                .build())
+            .readFrom(ReadFrom.REPLICA_PREFERRED)         // reads go to replica when available
+            .build();
+
+        return new LettuceConnectionFactory(clusterConfig, clientConfig);
+    }
+
     @Bean
     public RedisCacheManager cacheManager(RedisConnectionFactory factory) {
 

@@ -332,6 +332,19 @@ curl http://localhost:8080/api/products/1
 
 ---
 
+## Redis Cluster
+
+This project includes a full 6-node Redis Cluster setup (3 masters + 3 replicas) with a simulation API and unit tests. See **[CLUSTER.md](CLUSTER.md)** for the complete guide covering:
+
+- Cluster topology and how hash slots work
+- Docker Compose setup and CLI verification commands
+- Running the app against the cluster
+- Java code changes (`RedisConfig`, `ClusterController`)
+- Cluster API reference (`/api/cluster/*`)
+- Unit test design and Mockito gotchas
+
+---
+
 ## Testing
 
 ```bash
@@ -349,6 +362,8 @@ Tests run **without a real Redis instance**. Two mechanisms make this work:
 |---|---|
 | `findById_shouldCacheResult_onSecondCall` | `productRepository.findById()` is called exactly once despite two `service.findById()` calls — the second is served from cache |
 | `deleteProduct_shouldEvictFromCache` | After `deleteProduct()`, the next `findById()` is a cache miss and hits the DB again — proving eviction works |
+
+For cluster-specific unit tests (`ClusterControllerTest.java`, 13 tests), see [CLUSTER.md — Testing](CLUSTER.md#testing).
 
 ---
 
